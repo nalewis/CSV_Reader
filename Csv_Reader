@@ -1,0 +1,109 @@
+require 'roo'
+require 'json'
+require 'hashdiff'
+
+class CsvReader
+  # Creates two hashes from provided files to be used in comparison testing
+  # Params:
+  # +filepath1+:: First file to be parsed
+  # +filepath2+:: Second file to be parsed
+  # +title_row+:: Row in Excel containing the values that will be used as keys when creating records, defaults to 1
+  # +data_start_row+:: Row in Excel that contains the first record of data. Used in providing useful output in compares. Output will be inaccurate if data skips rows
+  # +skip_rows+:: Array of rows in Excel that should not be parsed for data. Can be used to skip blank lines, comments, etc.
+  def initialize(filepath1, filepath2, title_row = 1, data_start_row = 2, skip_rows = [])
+    #Array of file types currently supported
+    @accepted_formats = %w(.json .xlsx .xlsm .ods .csv .xls .xlm)
+
+    if title_row > data_start_row
+      raise('Title row needs to come before the data in this implementation.')
+    elsif skip_rows.include?(title_row) or skip_rows.include?(data_start_row)
+      raise("Can't skip title or data rows.")
+    elsif !@accepted_formats.include?(File.extname(filepath1).downcase)
+      raise("#{File.extname(filepath1).downcase} is not a supported file type.")
+    elsif !@accepted_formats.include?(File.extname(filepath2).downcase)
+      raise("#{File.extname(filepath2).downcase} is not a supported file type.")
+    end
+
+    @title_row = title_row
+    @data_start_row = data_start_row
+    @skip_rows = skip_rows
+
+    #Check if files are json, so non-excel action can be taken
+    if File.extname(filepath1).downcase == '.json'
+      file = File.read(filepath1)
+      @records1 = JSON.parse(file)
+    else #Create a hash from the excel document
+      @xlsx1 = Roo::Spreadsheet.open(filepath1)
+      @records1 = build_hash(@xlsx1)
+    end
+
+    if File.extname(filepath2).downcase == '.json'
+      file = File.read(filepath2)
+      @records2 = JSON.parse(file)
+    else
+      @xlsx2 = Roo::Spreadsheet.open(filepath2)
+      @records2 = build_hash(@xlsx2)
+    end
+  end
+
+  #Creates a JSON output of the specified input data. Data outputted is defaulted to filepath 1
+  # Params:
+  # +output_name+:: Name of the file that json data will be outputted to
+  # +record_num+:: Which set of records will be outputted. Anything other than 1 will select file 2
+  def output_json(output_name, record_num = 1)
+    if record_num == 1
+      File.open(output_name, 'w') { |file| file.write(build_json(@records1)) }
+    else
+      File.open(output_name, 'w') { |file| file.write(build_json(@records2)) }
+    end
+  end
+
+  #Using the 'hashdiff' gem, check for differences in the records and format usable messages to return to the user
+  def deep_compare
+    message = HashDiff.best_diff(@records1, @records2)
+
+    message.each do |diff|
+      case diff[0]
+        when '~'
+          row = diff[1].split('.')[0][1...-1].to_i + @data_start_row
+          column = diff[1].split('.')[1]
+          puts "Difference in row '#{row}' column '#{column}'.\n\tDocument 1:\t#{diff[2]}\n\tDocument 2:\t#{diff[3]}"
+        when '+'
+          row = diff[1].split('.')[0][1...-1].to_i + @data_start_row
+          column = diff[1].split('.')[1]
+          puts "Missing value in row '#{row}' column '#{column}'.\n\tDocument 1 has value:\t#{diff[2]}\n\tDocument 2 does not:"
+        when '-'
+          row = diff[1].split('.')[0][1...-1].to_i + @data_start_row
+          column = diff[1].split('.')[1]
+          puts "Missing value in row '#{row}' column '#{column}'.\n\tDocument 2 has value:\t#{diff[2]}\n\tDocument 1 does not:"
+        else
+          puts "Unhandled message!"
+      end
+    end
+  end
+
+  private
+    #Input an excel document and parse it using the 'roo' gem, turn to JSON and back again for formatting reasons ie: Dates
+    def build_hash(xlsx)
+      # print xlsx.sheet(0).cell(1, 'A')
+      i = 1
+      records, keys = [], []
+      xlsx.sheet(0).each do |row|
+        if i == @title_row
+          keys = row
+        elsif @skip_rows.include?(i)
+          #SKIP
+        else
+          records << Hash[keys.zip(row)]
+        end
+        i = i + 1
+      end
+
+      JSON.parse(build_json(records))
+    end
+
+    #Convert an array of hashes to json
+    def build_json(records)
+      records.map { |rec| Hash[rec.each_pair.to_a]}.to_json
+    end
+end
